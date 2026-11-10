@@ -1,0 +1,1739 @@
+﻿// All code from: /home/angelll/Documents/progamming/lab-07
+// ==========================================
+
+//CMakeLists.txt
+cmake_minimum_required(VERSION 3.16)
+project(ember CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_executable(ember
+    
+    #   --- MAIN DECLARATIONS
+    src/main.cpp
+    #   ----------------------
+    
+    src/ember.cpp
+    src/memory.cpp
+    src/dump.cpp
+    src/display.cpp 
+    src/cpu.cpp
+    src/alu.cpp
+    src/stack.cpp
+)
+
+target_compile_options(ember PRIVATE -Wall -Wextra -Werror)
+
+# Sanitizers on Debug builds. They are extra checks compiled *into* the binary:
+# walk off an array and the program prints a report and aborts, instead of
+# quietly "working". They stay on all semester.
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT MSVC)
+    target_compile_options(ember PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    target_link_options(ember PRIVATE -fsanitize=address,undefined)
+endif()
+
+
+//README.md
+
+
+
+Структура стеку у stack.hpp задана як звичайний тип даних, що не відповідає умові зберігання стеку у ділянці пам'яті 0xF00-0xFFF. Вона замінена.
+
+Подані у лабі сигнатури функцій у stack.hpp не відповідають _ISA.uk.md_. В сигнатурах uint16_t, тобто 2 байти, а у ISA операції мають на увазі один байт. Робота виконувалась з логікою для одного байту. 
+
+
+
+
+
+
+
+
+# M1 — SP, PUSH, POP і Stack як тип. 
+
+`SP` стартує з `0xFFF`; 
+регіон стека — `0xF00–0xFFF`. 
+
+Реалізуйте `PUSH A`, `POP A`, `PUSH B`, `POP B` (_ISA.uk.md_, `0x50–0x53`), «порожній спадний», як описано в таблиці.
+
+Логіку `push/pop` сховайте за абстрактним типом у `stack.hpp` / `stack.cpp` — обидві повертають `bool` як ознаку успіху — щоб `cpu.cpp` ніколи не чіпав представлення стека напряму. 
+Додайте в `ember` команду `stack`, яка друкує `SP` і кілька верхніх байтів, щоб стек було видно.
+
+Переповнення (нижче за `STACK_LO`) і спустошення (`underflow`, вище за `STACK_HI`) зупиняють машину вашим повідомленням. 
+Ніколи — падінням процесу і ніколи — тихим загортанням.
+
+
+
+
+
+
+
+
+
+
+
+# M2 — CALL / RET. 
+
+Саме так, як описано в _ISA.uk.md §6_: 
+- покласти молодший байт `PC + 3`, потім старший; 
+- знімати спершу старший, потім молодший. 
+Програма: 
+- CALL printA, HALT; 
+- printA: OUT, RET. 
+Простежте її в README — по рядку на крок, у ньому `PC`, `SP` і два байти на стеку. 
+І скажіть уголос, чому кладеться `PC + 3`, а не адреса самого `CALL`.
+
+
+
+
+
+M3 — рекурсія: fact. Реалізуйте MUL (0x1B) — один рядок у вашому ALU — потім покладіть у пам'ять лістинг із ISA.uk.md §6 і запустіть його.
+
+    fact(5) друкує 120 за 60 кроків, і SP повертається в 0xFFF.
+    fact(0) і fact(1) обидва друкують 1. Змініть першу пару байтів і перевірте.
+    Простежте: по рядку на кожен CALL і RET, у рядку SP і A. Наскільки глибоко воно провалюється?
+
+Далі зробіть його своїм — одне з трьох на вибір, з описом у README:
+
+    Перепишіть так, щоб він друкував кожне n на вході й на виході, і трасування збіглося з fact на C++ із notes.
+    Приберіть пару PUSH A / POP B і поясніть, що воно надрукує і чому.
+    Порахуйте fact(6) і поясніть відповідь: 720 не влазить у байт — що каже C?
+
+І нарешті одне навмисне переповнення: приберіть базовий випадок або зменште регіон стека. Спіймати його має ваше повідомлення про помилку, а не падіння процесу.
+
+M4 — розділіть бінарник. Щонайменше чотири одиниці трансляції: main, cpu, memory, stack (плюс display, якщо він у вас є). Жодних гігантських main.cpp. CMakeLists.txt, у якому вони всі перелічені. На захисті можуть спитати: «а чому push не в cpu.cpp?»
+Коли вважати готовим
+
+    SP, PUSH/POP і Stack як тип, у якого оброблені переповнення й спустошення.
+    CALL/RET збігаються з ISA.uk.md §6 побайтово; є простежена демонстрація виклику без рекурсії.
+    MUL реалізований; рекурсивний fact(5) = 120 працює; конвенція виклику записана; лістинг один раз змінений і пояснений; переповнення показане.
+    Кілька файлів .cpp і .hpp; CMake їх перелічує.
+    Тег lab-07.
+
+
+
+//src/alu.cpp
+#include "alu.hpp"
+
+
+//  Допоміжна функція для встановлення флагів 
+//  для побітових логічних операцій (AND, OR, XOR)
+static inline void set_bit_operation_flags(Flags& flags, Byte result) {
+    flags.c = false;                //  ніколи немає переповнення
+    flags.z = (result == 0);        //  нульовий результат?
+    flags.n = (result & 0x80) != 0; //  старший біт - одиниця?
+}
+
+
+//  Побітове додавання двох байтів
+//  carry - перенесення 8го байта (чи виникло)
+Byte ADD(Byte a, Byte b, Flags &flags){
+    Byte result = 0;
+    bool carry = false;          // вхідний перенос, локальний
+
+    for (int i = 0; i < 8; ++i) {
+        bool ab = (a >> i) & 1;
+        bool bb = (b >> i) & 1;
+        bool t  = ab ^ bb ^ carry;
+
+        carry = (ab && bb) || (ab && carry) || (bb && carry);
+
+        if (t)
+            result = (Byte)(result | (1u << i));
+    }
+
+    flags.c = carry;                 // записуємо локальний перенос у флаг
+    flags.z = (result == 0);
+    flags.n = (result & 0x80) != 0;  // 0x80 = 128(10) = 1000_0000(2) - маска старшого біта
+
+    return result;
+}
+
+//  Побітове віднімання двох байтів
+//  borrow - запозичення з 9го байта (чи виникло)
+Byte SUB(Byte a, Byte b, Flags &flags){
+    Byte result = 0;
+    bool borrow = false;         // вхідне запозичення, локальне
+
+    for (int i = 0; i < 8; ++i) {
+        bool ab = (a >> i) & 1;
+        bool bb = (b >> i) & 1;
+        bool t  = ab ^ bb ^ borrow;
+
+        // borrow виникає, коли треба відняти, а біта не вистачає (відняти від 0 одиницю)
+        borrow = (!ab && bb) || (!ab && borrow) || (bb && borrow);
+
+        if (t)
+            result = (Byte)(result | (1u << i));
+    }
+
+    flags.c = borrow;                // записуємо вихідне запозичення у флаг
+    flags.z = (result == 0);
+    flags.n = (result & 0x80) != 0;
+
+    return result;
+}
+
+//  -----------------------------------
+//  --- Побітові логічні операції   ---
+
+Byte AND(Byte a, Byte b, Flags &flags){
+    Byte result = (Byte)(a & b);
+    set_bit_operation_flags(flags, result);
+
+    /*  Example
+        0010 1010
+        0111 0110
+        ==========
+        0010 0010
+    */
+
+    return result;
+}
+Byte OR(Byte a, Byte b, Flags &flags){
+    Byte result = (Byte)(a | b);
+    set_bit_operation_flags(flags, result);
+
+    /* Example
+        0110 0100
+        1010 0111
+        ===========
+        1110 0111
+    */
+
+    return result;
+}
+Byte XOR(Byte a, Byte b, Flags &flags){
+    Byte result = (Byte)(a ^ b);
+    set_bit_operation_flags(flags, result);
+
+    /* Example
+        0110 0100
+        1010 0111
+        ===========
+        1100 0011
+    */
+
+    return result;
+}
+Byte NOT(Byte a, Flags &flags){
+    Byte result = ~a;
+    set_bit_operation_flags(flags, result);
+    
+    /* Example
+        0100 1101
+        ===========
+        1011 0010
+    */
+
+    return result;
+}
+//  -------------------------------------------------------------
+
+
+
+//  -----------------------
+//  --- Зсуви (логічні) ---
+
+Byte SHL(Byte a, Flags &flags){
+    Byte result = (Byte)(a << 1);
+
+    /* Example
+        0100 1101 <<
+        =============
+        1001 1010
+    */
+
+    flags.c = (a & 0x80) != 0;       //  біт 7 виштовхнувся назовні
+    flags.z = (result == 0);
+    flags.n = (result & 0x80) != 0;
+
+    return result;
+}
+Byte SHR(Byte a, Flags &flags){
+    Byte result = (Byte)((a >> 1) | (a & 0x80));
+    
+    /* Example
+        0100 1101 >>
+        =============
+        0010 0110
+    */
+
+    flags.c = (a & 0x01) != 0;
+    flags.z = (result == 0);
+    flags.n = (result & 0x80) != 0;
+    
+    return result;
+}
+//  ------------------------------------------------------------------
+
+
+
+//  -------------------------------
+//  --- Інкремент / декремент   ---
+
+Byte INC(Byte a, Flags &flags){
+    bool saved_c = flags.c;
+    
+    Byte result = ADD(a, 1, flags);
+    flags.c = saved_c;               //  INC не впливає на C
+    
+    return result;
+}
+Byte DEC(Byte a, Flags &flags){
+    bool saved_c = flags.c;
+    Byte result = SUB(a, 1, flags);
+    flags.c = saved_c;               //  DEC не впливає на C
+    return result;
+}
+//  ----------------------------------------------------------------- 
+
+//src/alu.hpp
+#ifndef _ALU_HPP_
+#define _ALU_HPP_
+
+#include <iostream>
+#include <cstdint>
+
+#include "cpu.hpp"
+
+using Byte = std::uint8_t;
+
+Byte ADD(Byte a, Byte b, Flags &flags);
+Byte SUB(Byte a, Byte b, Flags &flags);
+Byte AND(Byte a, Byte b, Flags &flags);
+Byte OR(Byte a, Byte b, Flags &flags);
+Byte XOR(Byte a, Byte b, Flags &flags);
+Byte NOT(Byte a, Flags &flags);
+Byte SHL(Byte a, Flags &flags);
+Byte SHR(Byte a, Flags &flags);
+Byte INC(Byte a, Flags &flags);
+Byte DEC(Byte a, Flags &flags);
+
+#endif
+
+//src/cpu.cpp
+#include <iomanip>
+#include <iostream>
+using namespace std;
+
+#include "alu.hpp"
+#include "display.hpp"
+#include "cpu.hpp"
+#include "dump.hpp"
+#include "stack.hpp"
+
+
+void dump_regs(const CPU& cpu) {
+    cout << "PC = " << "0x" << hex << cpu.pc << dec << "\n";
+    cout << "H = " << "0x" << hex << setw(2) << setfill('0') << cpu.H << dec << "  "
+         << to_bin(cpu.H, 16, 4) << "\n";
+    cout << "A = ";
+    show_byte(cpu.a);
+    cout << "B = ";
+    show_byte(cpu.b);
+    cout << "Z: " << cpu.f.z << "\n" << "N: " << cpu.f.n << "\n" << "C: " << cpu.f.c << "\n";
+}
+
+inline const char* bit(bool b) { return b ? "1" : "0"; }
+string flags_state(const CPU& cpu) {
+    return "   |   Z: " + string(bit(cpu.f.z)) + "  " + "N: " + string(bit(cpu.f.n)) + "  " +
+           "C: " + string(bit(cpu.f.c));
+}
+
+
+
+static bool is_mem_end(CPU &cpu) {
+    size_t idx = static_cast<size_t>(cpu.pc);
+    if(idx >= MEM_SIZE){
+        cout << "cpu.pc >= " << MEM_SIZE << ", value was " << cpu.pc << ". CPU was halted.\n";
+        cpu.halted = true;
+        return true;
+    }
+    return false;
+}
+
+// універсальний обробник невідомого опкоду для всіх default:
+static void unknown_opcode(Byte opcode, CPU &cpu){
+    cerr << "Unknown opcode 0x" << hex << static_cast<int>(opcode)
+        << " at PC=0x" << cpu.pc << dec << "\n";
+    cpu.halted = true;
+}
+
+//  загальна ф-я для обробки стрибків за умови
+static void JMPX(bool flag, CPU &cpu){
+    if(!flag){   //  якщо флаг НЕ виставлений - пропустити цю команду
+        cpu.pc +=3;
+        return;
+    }
+    //  інакше, флаг ВИСТАВЛЕНИЙ
+    cpu.pc = get16(*cpu.mem, cpu.pc+1);
+}
+
+
+
+
+
+void step(CPU& cpu) {
+    if (cpu.halted) {
+        cout << "halted\n";
+        return;
+    }
+    //  -- cpu.mem - це сам вказівник
+    //  ~ cpu.mem = ...                                         | переміщення
+    //  ~ cpu.mem++ / cpu.mem-- / cpu.mem += ... / cpu.mem -=   | переміщення через арифметику
+    //  ~ *cpu.mem                                              | взяти значення
+    Byte op = mem_get(*cpu.mem, cpu.pc);
+
+    switch ((Op)op) {
+        //  ------------------------------------------------------------------------------------
+        // -- IO
+        case Op::HALT:
+            cpu.halted = true;
+            cpu.pc++; // розмір HALT з таблиці — 1
+            break;
+        case Op::NOP:
+            cpu.pc++;
+            break;
+        case Op::OUT:
+            cout << to_character(cpu.a) << "\n";
+            cpu.pc++;
+            break;
+        case Op::OUTN:
+            cout << static_cast<int>(cpu.a) << " ";
+            cpu.pc++;
+            break;
+        case Op::OUTS: {
+            cpu.pc++;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            cpu.pc+=2;
+
+            for(int i = 0; i < 256; i++){
+                if(cpu.mem->data[addr + i] == '\0')
+                    break;
+                
+                cout << static_cast<char>(cpu.mem->data[addr+i]);
+            }
+
+            break;
+        }
+
+        //  ------------------------------------------------------------------------------------
+        // -- ALU
+        case Op::ADD: {
+            cout << "\n"
+                 << "ADD(" << static_cast<int>(cpu.a) << ", " << static_cast<int>(cpu.b)
+                 << ") = " << static_cast<int>(ADD(cpu.a, cpu.b, cpu.f)) << flags_state(cpu)
+                 << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::SUB: {
+            cout << "\n"
+                 << "SUB(" << static_cast<int>(cpu.a) << ", " << static_cast<int>(cpu.b)
+                 << ") = " << static_cast<int>(SUB(cpu.a, cpu.b, cpu.f)) << flags_state(cpu)
+                 << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::AND: {
+            cout << "\n"
+                 << "AND = " << to_bin(AND(cpu.a, cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::OR: {
+            cout << "\n"
+                 << "OR = " << to_bin(OR(cpu.a, cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::XOR: {
+            cout << "\n"
+                 << "XOR = " << to_bin(XOR(cpu.a, cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::NOT: {
+            cout << "\n"
+                 << "NOT(a) = " << to_bin(NOT(cpu.a, cpu.f)) << flags_state(cpu) << "\n"
+                 << "NOT(b) = " << to_bin(NOT(cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::SHL: {
+            cout << "\n"
+                 << "SHL(a) = " << to_bin(SHL(cpu.a, cpu.f)) << flags_state(cpu) << "\n"
+                 << "SHL(b) = " << to_bin(SHL(cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::SHR: {
+            cout << "\n"
+                 << "SHR(a) = " << to_bin(SHR(cpu.a, cpu.f)) << flags_state(cpu) << "\n"
+                 << "SHR(b) = " << to_bin(SHR(cpu.b, cpu.f)) << flags_state(cpu) << "\n\n";
+            cpu.pc++;
+            break;
+        }
+
+        case Op::INC: {
+            cpu.a = INC(cpu.a, cpu.f);
+            cpu.pc++;
+            break;
+        }
+
+        case Op::DEC: {
+            cpu.a = DEC(cpu.a, cpu.f);
+            cpu.pc++;
+            break;
+        }
+
+        case Op::CMP: {
+            (void)SUB(cpu.a, cpu.b, cpu.f);
+            cpu.pc++;
+            break;
+        }
+
+        //  ------------------------------------------------------------------------------------
+        // -- DATA
+        case Op::LOADI_A: {
+            cpu.pc++;                           //  наступна комірка = значення, imm8
+            if(is_mem_end(cpu)) return;
+            cpu.a = mem_get(*cpu.mem, cpu.pc);  //  взяти значення з пам'яті
+            cpu.pc++;                           //  наступна інструкція
+            break;
+        }
+        case Op::LOADI_B: {
+            cpu.pc++;                           //  наступна комірка = значення, imm8
+            if(is_mem_end(cpu)) return;
+            cpu.b = mem_get(*cpu.mem, cpu.pc);  //  взяти значення з пам'яті
+            cpu.pc++;                           //  наступна інструкція
+            break;
+        }
+        case Op::LOAD_A: {
+            cpu.pc++;
+            if(is_mem_end(cpu)) return;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            cpu.a = mem_get(*cpu.mem, addr);        //  у регістр А
+            cpu.pc+=2;
+            break;
+        }
+        case Op::LOAD_B: {
+            cpu.pc++;
+            if(is_mem_end(cpu)) return;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            cpu.b = (Byte)mem_get(*cpu.mem, addr);  //  у регістр B
+            cpu.pc+=2;
+            break;
+        }
+        case Op::STORE_A: {
+            cpu.pc++;
+            if(is_mem_end(cpu)) return;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            mem_set(*cpu.mem, addr, cpu.a);
+            cpu.pc+=2;
+            break;
+        }
+        case Op::STORE_B: {
+            cpu.pc++;
+            if(is_mem_end(cpu)) return;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            mem_set(*cpu.mem, addr, cpu.b);
+            cpu.pc+=2;
+            break;
+        }
+        case Op::MOV_AB: {
+            cpu.a = cpu.b;
+            cpu.pc++;
+            break;
+        }
+        case Op::MOV_BA: {
+            cpu.b = cpu.a;
+            cpu.pc++;
+            break;
+        }
+        case Op::LOADH: {
+            cpu.pc++;
+            if(is_mem_end(cpu)) return;
+            U16 addr = get16(*cpu.mem, cpu.pc);
+            cpu.H = addr;
+            cpu.pc+=2;
+            break;
+        }
+        case Op::LOAD_AH: {
+            cpu.a = mem_get(*cpu.mem, cpu.H);
+            cpu.pc++;
+            break;
+        }
+        case Op::STORE_HA: {
+            mem_set(*cpu.mem, cpu.H, cpu.a);
+            cpu.pc++;
+            break;
+        }
+        case Op::INC_H: {
+            cpu.H++;
+            cpu.pc++;
+            break;
+        }
+        case Op::DEC_H: {
+            cpu.H--;
+            cpu.pc++;
+            break;
+        }
+        case Op::H_LOW: {
+            /* NOT THIS LAB */
+            break;
+        }
+
+        //  ------------------------------------------------------------------------------------
+        // -- JUMP
+        case Op::JMP:
+            cpu.pc = get16(*cpu.mem, cpu.pc+1);
+            break;
+
+        case Op::JZ:
+            JMPX(cpu.f.z, cpu);
+            break;
+
+        case Op::JNZ:
+            JMPX(!cpu.f.z, cpu);
+            break;
+
+        case Op::JC:
+            JMPX(cpu.f.c, cpu);
+            break;
+
+        case Op::JNC:
+            JMPX(!cpu.f.c, cpu);
+            break;
+
+        //  ------------------------------------------------------------------------------------
+        // -- DISPLAY
+        case Op::SHOW:
+            display::show(*cpu.mem);
+            cpu.pc++;
+            break;
+
+        case Op::PLOT:
+            display::plot(*cpu.mem, cpu.a, cpu.b);
+            cpu.pc++;
+            break;
+
+        case Op::UNPLOT:
+            display::unplot(*cpu.mem, cpu.a, cpu.b);
+            cpu.pc++;
+            break;
+
+        case Op::CLS:
+            display::clear(*cpu.mem);
+            cpu.pc++;
+            break;
+
+        //  ------------------------------------------------------------------------------------
+        // -- STACK
+        case Op::PUSH_A:
+            if (!push(cpu.stack, cpu.a)) { cerr << "Stack overflow at PC=...\n"; cpu.halted = true; return; }
+            cpu.pc++;
+            break;
+        case Op::POP_A:
+            if (!pop(cpu.stack, cpu.a)) { cerr << "Stack underflow ...\n"; cpu.halted = true; return; }
+            cpu.pc++;
+            break;
+
+        //  ------------------------------------------------------------------------------------
+        default:
+            unknown_opcode(op,cpu);
+            break;
+
+    }
+}
+
+//src/cpu.hpp
+//#pragma once
+#ifndef _CPU_HPP_
+#define _CPU_HPP_
+
+#include <iostream>
+using namespace std;
+
+#include "memory.hpp"
+#include "stack.hpp"
+
+
+enum class Op : Byte {
+    // --- IO
+    HALT      = 0x00,  //  Stop VM (exit)   0
+    NOP       = 0x01,  //  No operation     1
+    OUT       = 0x02,  //  Print A as symbol
+    OUTN      = 0x03,  //  Print A as DEC number +space 
+    OUTS      = 0x04, //  Print bytes from Addr while not '\0'
+
+    // --- ALU
+    ADD       = 0x10,  //  +    16
+    SUB       = 0x11,  //  -    17
+    AND       = 0x12,  //  &&   18
+    OR        = 0x13,  //  ||   19
+    XOR       = 0x14,  //  %2   20
+    NOT       = 0x15,  //  !    21
+    SHL       = 0x16,  //  <<   22
+    SHR       = 0x17,  //  >>   23
+    INC       = 0x18,  //  ++   24
+    DEC       = 0x19,  //  --   25
+    CMP       = 0x1a,  //  A-B, set Z/N/C
+
+    // --- DATA
+    LOADI_A   = 0x20, //  Load 8 bits to 
+    LOADI_B   = 0x21, //  Load 8 bits to 
+    LOAD_A    = 0x22, //  Load 8 bits to 
+    LOAD_B    = 0x23, //  Load 8 bits to 
+    STORE_A   = 0x24, //  Put A to mem[ad
+    STORE_B   = 0x25, //  Put B to mem[ad
+    MOV_AB    = 0x26, //  A = B
+    MOV_BA    = 0x27, //  B = A
+    LOADH     = 0x28, //  Load 16 bit to 
+    LOAD_AH   = 0x29, //  A = mem[H]
+    STORE_HA  = 0x2a, //  mem[H] = A
+    INC_H     = 0x2b, //  H +1
+    DEC_H     = 0x2c, //  H -1
+    H_LOW     = 0x2d, //  low byte from H
+
+    // --- JUMP
+    JMP       = 0x30,  // jump anyway
+    JZ        = 0x31,  // jump, if Z=1
+    JNZ       = 0x32,  // jump, if Z=0
+    JC        = 0x33,  // jump, if C=1
+    JNC       = 0x34,  // jump, if C=0
+
+    // --- DISPLAY
+    CLS       = 0x40,  //  clear VRAM
+    PLOT      = 0x41,  //  draw one pixel
+    UNPLOT    = 0x42,  //  clear one pixel
+    SHOW      = 0x43,  //  print VRAM in console
+
+    // --- STACK
+    PUSH_A    = 0x50,  // mem[SP] = A; SP = SP - 1
+    POP_A     = 0x51,  // SP = SP + 1; A = mem[SP]
+    PUSH_B    = 0x52,  // ...same
+    POP_B     = 0x53,  // ...as for A
+    CALL      = 0x54,  // покласти адресу повернення (2 байти), потім PC = addr
+    RET       = 0x55,  // зняти 2 байти в PC
+    PUSH_H    = 0x56,  // opt покласти H (2 байти: молодший, потім старший)
+    POP_H     = 0x57,  // opt зняти 2 байти в H
+};
+
+
+
+//  Types
+//
+struct Flags {
+    bool z = false;   // результат нульовий
+    bool n = false;   // старший біт результату — одиниця
+    bool c = false;   // біт, який виїхав за межу восьми
+};
+
+struct CPU {
+    Memory* mem = nullptr;   // вказівник на пам'ять
+    U16 pc = 0;     //  адреса поточної інструкції для step
+    U16 H = 0;      //  пам'ять для адреси
+    Byte a = 0;
+    Byte b = 0;
+    Flags f;
+    Stack stack;
+    bool halted = false;     // після HALT наступні step відмовляють
+};
+//  -----------------------------------------------------------------
+
+
+//  Functions
+//  
+void step(CPU& cpu);
+void dump_regs(const CPU& cpu);
+string flags_state(const CPU& cpu);
+//  ----------------------------------------
+
+#endif
+
+//src/display.cpp
+#include <iostream>
+using namespace std;
+
+#include "display.hpp"
+
+
+namespace display {
+
+    void show(const Memory& mem) {
+        for (int y = 0; y < VRAM_ROWS; y++) {
+            for (int x = 0; x < VRAM_COLS; x++) {
+                Byte cell = mem.data[VRAM_LO + (y * 8) + (x / 8)];
+                bool lit = (cell >> (7 - (x % 8))) & 1;
+                cout << (lit ? VRAM_SYMBOL_FILL : VRAM_SYMBOL_EMPTY);
+            }
+            cout << '\n';
+        }
+    }
+
+    static void plot_op(Memory& mem, int x, int y, bool set = true){
+        if (x < 0 || x >= VRAM_COLS || y < 0 || y >= VRAM_ROWS)
+            return;
+
+        int address = VRAM_LO + (y * 8) + (x / 8);
+        int bit = 7 - (x % 8);
+
+        if(set)
+            //  Для вставновлення "1" ==> операція АБО
+            mem.data[address] |= ((Byte)1 << bit);
+        else
+            //  Для скидання ==> операція І-НЕ
+            mem.data[address] &= ~((Byte)1 << bit);
+    }
+
+    void plot(Memory& mem, int x, int y) {
+        plot_op(mem, x, y, true);
+    }
+
+    void unplot(Memory& mem, int x, int y) {
+        plot_op(mem, x, y, false);
+    }
+
+    void clear(Memory& mem) {
+        for (int i = 0; i < VRAM_ROWS*VRAM_COLS / 8; i++) {
+            mem.data[VRAM_LO + i] = 0x00;
+        }
+    }
+
+}
+
+//src/display.hpp
+#ifndef _DISPLAY_HPP_
+#define _DISPLAY_HPP_
+
+#include "memory.hpp"
+
+namespace display {
+
+    const U16 VRAM_LO = 0x0A00;
+
+    const int VRAM_ROWS = 32;
+    const int VRAM_COLS = 64;
+
+    const char VRAM_SYMBOL_FILL = '#';      // 
+    const char VRAM_SYMBOL_EMPTY = '.';     //
+
+
+    void show(const Memory& mem);
+    void plot(Memory& mem, int x, int y);
+    void unplot(Memory& mem, int x, int y);
+    void clear(Memory& mem);
+}
+
+struct Sprite { 
+    uint8_t x = display::VRAM_COLS+1; 
+    uint8_t y = display::VRAM_ROWS+1;
+    int8_t vx=0; 
+    int8_t vy=0;
+    bool alive;
+};
+
+#endif
+
+//src/dump.cpp
+// dump.cpp — hex + ASCII, like the Unix tool `hexdump -C`.
+//
+// The `dump` function below is GIVEN and working, except for one TODO.
+// Read it before you change it: it is the shape of nearly every loop you will
+// write this semester (an outer loop over rows, an inner loop over columns).
+#include <iomanip>
+#include <iostream>
+using namespace std;
+
+#include "dump.hpp"
+
+
+// How many bytes we print on one line. Try changing it to 8 and rebuilding.
+const size_t BYTES_PER_LINE = 32;
+
+// Is this byte something a terminal can print as a glyph?
+// 0x20 is space, 0x7E is '~'. Everything outside that range we show as '.'.
+static bool is_printable(Byte b) { return b >= 0x20 && b <= 0x7E; }
+
+void dump(const Memory& mem) {
+    // hex switches the stream to hexadecimal; setfill/setw pad with zeros
+    // so every number is the same width and the columns line up.
+    for (size_t row = 0; row < MEM_SIZE; row += BYTES_PER_LINE) {
+
+        // The address column: 0000, 0010, 0020, ...
+        cout << hex << setfill('0') << setw(4) << row << "  ";
+        //  0, 16, 32, 48, ....
+
+        // The hex column: 16 bytes, two digits each.
+        for (size_t col = 0; col < BYTES_PER_LINE; ++col) {
+            Byte b = mem.data[row + col];
+            cout << setw(2) << static_cast<int>(b) << ' ';
+        }
+
+        cout << " |";
+
+        // The ASCII gutter.
+        for (size_t col = 0; col < BYTES_PER_LINE; ++col) {
+            Byte b = mem.data[row + col];
+            // TODO(lab-01, M2): when the byte IS printable, print the byte
+            //                   itself instead of the dot. One token changes.
+            //                   Hint: a Byte sent to cout prints as a
+            //                   character already - that is the whole joke of
+            //                   Lab 1. Right now every byte looks unprintable.
+            if (is_printable(b)) {
+                cout << b;
+            } else {
+                cout << '.';
+            }
+        }
+
+        cout << "|\n";
+    }
+
+    // Put the stream back to decimal, or every number you print later is hex.
+    cout << dec << setfill(' ');
+}
+
+
+
+
+
+string to_bin(long long n, int bits, int separate, bool show_prefix) {
+    string res = show_prefix ? "0b" : "";
+    for (int i = bits - 1; i >= 0; --i) {
+        //  Transform data with binary operations
+        res += (n & (1LL << i)) ? '1' : '0';
+
+        if(i % separate == 0 && i > 0)
+            res += "_";
+    }
+    return res;
+}
+
+string to_character(Byte b) {
+    return is_printable(b) ? string(1, (char)b) : ".";
+}
+
+
+
+
+
+
+// Показати байт у вигляді 10го, 16го, 2го, та символ
+//  Приймає байт, друкує строку виду: 65  0x41  0b01000001  'A'
+void show_byte(Byte b) {
+    // Expected for `set 0 65` then `get 0`:
+    //   65  0x41  0b01000001  'A'
+
+    int number = static_cast<int>(b);
+    
+    char character = 
+        is_printable(b) ? b : '.';
+
+    //  DEC
+    cout << number << "  ";
+    //  HEX
+    cout << "0x" << hex << number << "  " << dec;
+    //  BIN
+    cout << to_bin(number) << "  ";
+    //  CHAR
+    cout << "'" << character << "'" << "\n";
+}
+
+void show_two_bytes(U16 u){
+    Byte low = (u >> 8);
+    Byte high = u;
+
+    //int number_low = static_cast<int>(low);
+    //int number_high = static_cast<int>(high);
+
+    //  DEC
+    cout << static_cast<int>(u) << "  ";
+    //  HEX
+    cout << "0x" << hex << static_cast<int>(u) << dec << "  ";
+    //  BIN
+    cout << "0b" << to_bin(high, 8, 4, false) << "_" << to_bin(low, 8, 4, false) << "\n";
+}
+
+//src/dump.hpp
+// dump.hpp — two ways of looking at bytes.
+// GIVEN.
+//#pragma once
+
+#ifndef _DUMP_HPP_
+#define _DUMP_HPP_
+
+#include<iostream>
+using namespace std;
+
+#include "memory.hpp"
+
+// Print the whole box, 16 bytes per line: address, hex, ASCII gutter.
+void dump(const Memory& mem);
+
+// Print ONE byte four ways: decimal, hex, binary, character.
+// Example for the byte 65:   65  0x41  0b01000001  'A'
+// TODO(lab-01, M3): implement in dump.cpp.
+void show_byte(Byte b);
+void show_two_bytes(U16 u);
+
+string to_bin(long long n, int bits = 8, int separate = 8, bool show_prefix = false);
+string to_character(Byte b);
+
+
+#endif
+
+//src/ember.cpp
+#include <iostream>
+#include <sstream>
+#include <unistd.h>
+#include <cstdlib>
+
+using namespace std;
+
+#include "ember.hpp"
+#include "display.hpp"
+#include "dump.hpp"
+
+
+const int TICK_DELAY = 100; //  delay in sprites animation drawing (ms)
+
+
+// Turn a word into a number. Accepts decimal (65) and hex (0x41).
+// Returns false if the word is not a number at all.
+static bool parse_number(const string& word, long& out) {
+    try {
+        size_t used = 0;
+        // base 0 means: look at the prefix. "0x41" is hex, "65" is decimal.
+        out = stol(word, &used, 0);
+        return used == word.size(); // reject things like "12abc"
+    } catch (...) {
+        return false;
+    }
+}
+
+
+//  =============================================================================
+//  ==============  COMMANDS
+//
+void cmd_get(Memory& mem, istringstream& words) {
+    string a;
+    long addr = 0;
+    if (!(words >> a) || !parse_number(a, addr)) {
+        cout << "usage: get <addr>\n";
+        return;
+    }
+    if (addr < 0) {
+        cout << "address must not be negative\n";
+        return;
+    }
+    
+    show_byte(mem_get(mem, static_cast<size_t>(addr)));
+}
+
+void cmd_set(Memory& mem, istringstream& words) {
+    string a, v;
+    long addr = 0, value = 0;
+    if (!(words >> a) || !(words >> v) || !parse_number(a, addr) || !parse_number(v, value)) {
+        cout << "usage: set <addr> <value>\n";
+        return;
+    }
+    if (addr < 0) {
+        cout << "address must not be negative\n";
+        return;
+    } 
+    if (value < 0 || value > 255) {
+        // A cell holds ONE byte. 256 does not fit. Lab 1, theory 3.
+        cout << "a byte is 0..255, got " << value << '\n';
+        return;
+    }
+    if (!mem_set(mem, static_cast<size_t>(addr), static_cast<Byte>(value))) {
+        cout << "address " << addr << " is outside 0.." << MEM_SIZE - 1 << '\n';
+        return;
+    }
+}
+
+void cmd_inc(Memory& mem, istringstream& words) {
+    string a;
+    long addr = 0;
+
+    if (!(words >> a) || !parse_number(a, addr)) {
+        cout << "usage: inc <addr>\n";
+    } else if (addr < 0) {
+        cout << "address must not be negative\n";
+    } else {
+        bool result = inc(mem, addr);
+
+        if (!result) {
+            cout << "Error during cmd: inc <addr>, addr = " << addr << "\n";
+        }
+    }
+}
+
+void cmd_reg(CPU& cpu, istringstream& words) {
+    string r, v;
+    long value = 0;
+    
+    if (
+        !(words >> r) || !(words >> v) ||   //  чи достатньо елементів у команді?
+        !(r == "a" || r == "b") ||          //  r є "а" або "b"?
+        !parse_number(v, value) ||          //  чи v є цілим числом?
+        value < 0 || value > 255            //  чи v в межах 0-255
+    ) {
+        cout << "usage: reg <a|b> <0..255>\n";
+        return;
+    }
+    
+    cpu.a = (r == "a") ? (Byte)value : cpu.a;
+    cpu.b = (r == "b") ? (Byte)value : cpu.b;
+}
+
+
+void cmd_get16(Memory& mem, istringstream& words){
+    string a;
+    long addr = 0;
+    if (!(words >> a) || !parse_number(a, addr)) {
+        cout << "usage: get16 <addr>\n";
+        return;
+    }
+    if (addr < 0) {
+        cout << "address must not be negative\n";
+        return;
+    }
+    U16 result = get16(mem, addr);
+
+    show_two_bytes(result);
+}
+
+
+void cmd_set16(Memory& mem, istringstream& words){
+    string a, v;
+    long addr = 0, value = 0;
+    if (!(words >> a) || !(words >> v) || !parse_number(a, addr) || !parse_number(v, value)) {
+        cout << "usage: set16 <addr> <value>\n";
+        return;
+    }
+    if (addr < 0) {
+        cout << "address must not be negative\n";
+        return;
+    } 
+    if (value < 0 || value > 65'535) {
+        // A cell holds TWO byte. Value less than 65536 (2^16) 
+        cout << "a byte is 0..65535, got " << value << '\n';
+        return;
+    }
+
+    if(!set16(mem, addr, static_cast<U16>(value))){
+        cout << "address " << addr << " is outside 0.." << MEM_SIZE - 1 << '\n';
+    }
+}
+
+
+
+
+
+void cmd_run(CPU& cpu) {
+    size_t steps = 0;
+
+    if (cpu.halted) {
+        cerr << "Error: CPU halted\n";
+        return;
+    }
+
+    while (!cpu.halted) {
+
+        if(steps >= MAX_STEPS){
+            cout << "MAX_STEPS (" << MAX_STEPS << ") limit reached, run stopped\n";
+            break;
+        }
+
+        step(cpu);
+        steps++;
+    }   
+}
+
+//  find <lo> <hi> <byte> <?deepth=8>
+//  <lo> <hi> - це адреса, з якої почати пошук (глибиною 8 байт)
+//  <byte> - яке значення шукаємо?
+void cmd_find(Memory& mem, istringstream &words, bool first_only){
+    string l, h, b, d;
+    long low, high, search_byte;
+    int deepth = 8;
+
+    if( //  зчитування слів, перетворення у числа
+        !(words >> l) || !(words >> h) || !(words >> b) ||
+        !parse_number(l, low) || !parse_number(h, high) || !parse_number(b, search_byte)
+    ) {
+        cout << "usage: find <lo> <hi> <byte> <?deepth=8>\n";
+        return;
+    }
+
+    long ldeepth = 0;       //  зчитування глибини пошуку (опціонально)
+    if(words >> d) {
+        parse_number(d, ldeepth);       //  перетворення у число
+
+        if(ldeepth > 0 && (size_t)ldeepth < MEM_SIZE){
+            //  якщо більше 0 та менше за розмір пам'яті - прийняти значення
+            deepth = ldeepth;
+        }
+    }
+
+    //  збірка 16-адреси з двох байтів (8)
+    U16 addr = 0;
+    addr = addr | low;
+    addr = addr | (high << 8);
+
+    //  перетворення шуканого байту у число
+    long byte_value = static_cast<long>(search_byte);
+    if(byte_value < -1 || byte_value > 255) {    //  перевірка меж
+        cout << "byte must not be 0-255 of -1 (non-zero search), got " << byte_value << "\n";
+        return;
+    }
+
+    bool finded = false;    //  чи знайдено хоча б один збіг?
+
+    //  цикл пошуку: для addr та наступних deepth адрес
+    for(int i = 0; i < deepth; i++){    //  до глибини пошуку
+        if((size_t)(addr + i) >= MEM_SIZE)        //  чи кінець пам'яті?
+            break;
+
+        Byte mem_value = mem.data[addr + i];    //  взяти значення
+
+        //  якщо співпало
+        if(
+            (static_cast<long>(mem_value) == search_byte) ||            //  збіг
+            (search_byte == -1 && static_cast<long>(mem_value) != 0)    //  ненульове значення, якщо пошук за -1
+        
+        ) {
+            cout << "Value 0x" << hex << static_cast<long>(mem_value) << " was finded at address 0x" << (addr+i) << dec << "\n";
+            finded = true;
+
+            if(first_only)
+                return;
+        }
+    }
+
+    //  якщо жодного збігу
+    if(!finded) {
+        cout << "Value 0x" << hex << search_byte << " was NOT finded at 0x" << addr << " - 0x" << addr+deepth << dec << "\n";
+    }
+}
+
+void cmd_draw_frame(Memory &mem){
+    display::clear(mem);
+    for(int i = 0; i < display::VRAM_COLS; i++)
+        display::plot(mem, i, 0);
+    //  нижня
+    for(int i = 0; i < display::VRAM_COLS; i++)
+        display::plot(mem, i, display::VRAM_ROWS-1);
+    //  ліва
+    for(int i = 0; i < display::VRAM_ROWS; i++)
+        display::plot(mem, 0, i);
+    //  права
+    for(int i = 0; i < display::VRAM_ROWS; i++)
+        display::plot(mem, display::VRAM_COLS-1, i);
+}
+
+
+void cmd_sprite(Sprite (&sprites)[8], istringstream& words){
+    string i, x, y, vx, vy;
+    
+    //  check words
+    if(
+        !(words >> i) || !(words >> x) || !(words >> y) ||
+        !(words >> vx) || !(words >> vy)
+    ) {
+        cout << "usage: sprite <i> <x> <y> <vx> <vy>\n";
+        return;
+    }
+
+    //  strings => long
+    long li, lx, ly, lvx, lvy;
+    bool ic = parse_number(i, li);
+    bool xc = parse_number(x, lx);
+    bool yc = parse_number(y, ly);
+    bool vxc = parse_number(vx, lvx);
+    bool vyc = parse_number(vy, lvy);
+
+    //  Validation
+    if(!ic || li < 0 || li > 7){
+        cout << "<i> must be 0..7\n"; return;
+    }
+    if(!xc || lx < 0 || lx > display::VRAM_COLS) {
+        cout << "<x> must be 0.." << display::VRAM_COLS << "\n"; return;
+    }
+    if(!yc || ly < 0 || ly > display::VRAM_ROWS) {
+        cout << "<y> must be 0.." << display::VRAM_ROWS << "\n"; return;
+    }
+    if(!vxc || lvx < -1 || lvx > 1){
+        cout << "<vx> must be -1..1\n"; return;
+    }
+    if(!vyc || lvy < -1 || lvy > 1){
+        cout << "<vy> must be -1..1\n"; return;
+    }
+
+    // Create sprite
+    Sprite s;
+    s.alive = true;
+    s.x = (uint8_t)lx;
+    s.y = (uint8_t)ly;
+    s.vx = (int8_t)lvx;
+    s.vy = (int8_t)lvy;
+
+    //  Put into array
+    sprites[(int)li] = s;
+}
+
+void cmd_tick(Sprite (&sprites)[8], Memory& mem){
+
+    //  Clear display buffer
+    display::clear(mem);
+
+    for(int i = 0; i < 8; i++){
+
+        if(
+            sprites[i].x >= display::VRAM_COLS || sprites[i].y >= display::VRAM_ROWS
+        ){
+            continue;
+        }
+
+        //  calculate memory address
+        int address = display::VRAM_LO + (sprites[i].y * 8) + (sprites[i].x / 8);
+        int bit = 7 - (sprites[i].x % 8);
+
+        //  set sprite to memory
+        mem.data[address] |= ((Byte)1 << bit);
+
+        uint8_t nextX = sprites[i].x + sprites[i].vx;
+        uint8_t nextY = sprites[i].y + sprites[i].vy;
+
+        //  sprite moving
+        if(nextX < display::VRAM_COLS) sprites[i].x = nextX;
+        if(nextY < display::VRAM_ROWS) sprites[i].y = nextY;
+
+        // check display edges collision
+        if(
+            (sprites[i].x >= display::VRAM_COLS-1 && sprites[i].vx > 0) ||
+            (sprites[i].x <= 0 && sprites[i].vx < 0)
+        )
+            sprites[i].vx *= -1;
+
+        if(
+            (sprites[i].y >= display::VRAM_ROWS-1 && sprites[i].vy > 0) ||
+            (sprites[i].y <= 0 && sprites[i].vy < 0)
+        )
+            sprites[i].vy *= -1;
+        
+    }
+
+    //  Show display
+    display::show(mem);
+}
+void cmd_tick_loop(Sprite (&sprites)[8], Memory& mem, istringstream& words){
+    string c;
+    long lc;
+    if(!(words >> c) || !parse_number(c, lc)){
+        cout << "usage: tick_loop <c>, where c > 0\n";
+        return;
+    }
+    
+    for(int i = 0; i < (int)lc; i++){
+        system("clear");
+        cmd_tick(sprites, mem);
+        usleep(TICK_DELAY * 1000);
+    }
+}
+
+
+
+void cmd_show_sizes(){
+    cout << "\n";
+    cout << "sizeof(CPU)    = " << sizeof(CPU)  << '\n';
+    cout << "alignof(CPU)   = " << alignof(CPU) << '\n';
+    cout << "sizeof(Flags)  = " << sizeof(Flags)<< '\n';
+    cout << "alignof(Flags) = "<< alignof(Flags)<< '\n';
+
+    cout << "\n";
+
+    cout << "sizeof(CPU) => {\n";
+    cout << "  Memory* mem  |   sizeof(Memory*)  = " << sizeof(Memory*) << "\n";
+    cout << "  U16 pc       |   sizeof(uint16_t) = " << sizeof(U16) << "\n";
+    cout << "  U16 H        |   sizeof(uint16_t) = " << sizeof(U16) << "\n";
+    cout << "  Byte a       |   sizeof(uint8_t)  = " << sizeof(Byte) << "\n";
+    cout << "  Byte b       |   sizeof(uint8_t)  = " << sizeof(Byte) << "\n";
+    cout << "  Flags f      |   sizeof(Flags)    = " << sizeof(Flags) << "\n";
+    cout << "  bool halted  |   sizeof(bool)     = " << sizeof(bool) << "\n";
+    cout << "}\n\n";
+
+    cout << "Offsets: \n";
+    cout << "   mem    @" << offsetof(CPU, mem)    << '\n';
+    cout << "   pc     @" << offsetof(CPU, pc)     << '\n';
+    cout << "   H      @" << offsetof(CPU, H)      << '\n';
+    cout << "   a      @" << offsetof(CPU, a)      << '\n';
+    cout << "   b      @" << offsetof(CPU, b)      << '\n';
+    cout << "   f      @" << offsetof(CPU, f)      << '\n';
+    cout << "   halted @" << offsetof(CPU, halted) << '\n';
+}
+
+
+
+//src/ember.hpp
+#ifndef _EMBER_HPP_
+#define _EMBER_HPP_
+
+#include <iostream>
+#include <sstream>
+using namespace std;
+
+#include "cpu.hpp"
+#include "display.hpp"
+
+
+const size_t MAX_STEPS = 100'000;
+
+//  Command functions
+void cmd_get(Memory& mem, istringstream& words);
+void cmd_set(Memory& mem, istringstream& words);
+void cmd_inc(Memory& mem, istringstream& words);
+void cmd_reg(CPU& cpu, istringstream& words);
+void cmd_get16(Memory& mem, istringstream& words);
+void cmd_set16(Memory& mem, istringstream& words);
+void cmd_run(CPU &cpu);
+
+void cmd_find(Memory& mem, istringstream& words, bool first_only = false);
+
+
+void cmd_draw_frame(Memory &mem);
+void cmd_sprite(Sprite (&sprites)[8], istringstream& words);
+void cmd_tick(Sprite (&sprites)[8], Memory& mem);
+void cmd_tick_loop(Sprite (&sprites)[8], Memory& mem, istringstream& words);
+
+
+void cmd_show_sizes();
+
+
+#endif
+
+//src/main.cpp
+#include <exception>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+using namespace std;
+
+#include "cpu.hpp"
+#include "dump.hpp"
+#include "memory.hpp"
+#include "ember.hpp"
+#include "display.hpp"
+#include "stack.hpp"
+
+
+static void print_help() {
+    cout << "commands:\n"
+         << "  dump                                         print all " << MEM_SIZE << " bytes\n"
+         << "  get <addr>                                   show one byte four ways\n"
+         << "  get16 <addr>                                 show two bytes from addr\n"
+         << "  set <addr> <val>                             write one byte (dec or 0x hex)\n"
+         << "  set16 <addr> <val>                           write two bytes (dec or 0x hex)\n"
+         << "  find <lo> <hi> <byte> <?deepth=8>            find <byte> at memory, -1 for non-zero search\n"
+         << "  find_first <lo> <hi> <byte> <?deepth=8>      find only first <byte> at memory, -1 for non-zero search"
+         << "  inc <addr>                                   increment value and overwrite\n"
+         << "  reg <a|b> <0..255>                           set CPU register <a|b> value\n"
+         << "  regs                                         show current CPU state\n"
+         << "  step                                         perform one CPU instruction\n"
+         << "  run                                          perform steps until HALT\n"
+         << "  vram_show                                    draw VRAM state to the console\n"
+         << "  draw_frame                                   draw frame in VRAM\n"
+         << "  sprite <i> <x> <y> <vx> <vy>                 set one sprite in VRAM\n"
+         << "  tick                                         show one frame sprites animation\n"
+         << "  tick_loop <c>                                tick <c> times in loop\n"
+         << "  vram_clear                                   clear all VRAM\n"
+         << "  show_sizes                                   show sizeof() alignof() offsetof() CPU\n"
+         << "  help                                         this list\n"
+         << "  quit                                         leave\n";
+}
+
+
+int main() {
+    Memory mem; // 4096 bytes
+    CPU cpu;
+    Sprite sprites[8];
+
+    //  --------------  TEST AREA   ----------------------------------------
+    
+
+    //  Test 1: Memory leak
+    //new int{1};
+
+    // // Test 2: Read after delete
+    // int* p = new int{42};
+    // cout << *p << '\n';
+    // delete p;
+    // cout << *p << '\n';   // dangling
+
+    // // Test 3: Double delete
+    // int *p = new int{42};
+    // cout << *p << "\n";
+    // delete p;
+    // delete p;
+
+    //  ---------------------------------------------------------------------
+
+
+    cpu.mem = &mem; //  прив'язка процесора до пам'яті, & значить - "працює з пам'яттю напряму"
+    stack_init(cpu.stack, mem);
+
+
+    cout << "ember 0.1 - 4096 bytes of memory you can see. Type `help`.\n";
+
+    string line;
+    while (true) {
+        cout << "\nember> ";
+
+        // getline reads whole line. It returns false at end of input (Ctrl-D)
+        if (!getline(cin, line)) {
+            cout << '\n';
+            break;
+        }
+
+        // Split the line into words
+        istringstream words(line);
+        string cmd;
+
+        words >> cmd;
+
+        if (cmd.empty()) {
+            continue; // the user just pressed Enter
+        } else if (cmd == "quit" || cmd == "exit") {
+            break;
+        } else if (cmd == "help") {
+            print_help();
+        } else if (cmd == "dump") {
+            dump(mem);
+        } else if (cmd == "get") {
+            cmd_get(mem, words);
+        } else if (cmd == "set") {
+            cmd_set(mem, words);
+        } else if (cmd == "inc") {
+            cmd_inc(mem, words);
+        } else if (cmd == "reg") {
+            cmd_reg(cpu, words);
+        } else if (cmd == "regs") {
+            dump_regs(cpu);
+        } else if(cmd == "step") {
+            step(cpu);
+        } else if (cmd == "run") {
+            cmd_run(cpu);
+        }
+        
+        
+        else if (cmd == "get16") {
+            cmd_get16(mem, words);
+        } else if (cmd == "set16") {
+            cmd_set16(mem, words);   
+        }
+
+        else if (cmd == "find") {
+            cmd_find(mem, words);
+        }
+        else if (cmd == "find_first") {
+            cmd_find(mem, words, true);
+        }
+
+        else if(cmd == "draw_frame") {
+            cmd_draw_frame(mem);
+        }
+        else if(cmd == "sprite") {
+            cmd_sprite(sprites, words);
+        }
+        else if (cmd == "vram_show") {
+            display::show(mem);
+        }
+        else if(cmd == "tick") {
+            cmd_tick(sprites, mem);
+        }
+        else if(cmd == "tick_loop") {
+            cmd_tick_loop(sprites, mem, words);
+        }
+        else if (cmd == "vram_clear") {
+            display::clear(mem);
+        }
+        else if(cmd == "show_sizes") {
+            cmd_show_sizes();
+        }
+        
+        else {
+            cout << "unknown command: " << cmd << " (try `help`)\n";
+        }
+    }
+
+    return 0; // 0 means "success" to the operating system
+}
+
+
+
+
+
+//src/memory.cpp
+using namespace std;
+
+#include "dump.hpp"
+#include "memory.hpp"
+
+
+const int SIZE = 4095;
+
+Byte mem_get(const Memory& mem, size_t addr) {
+    
+    if(addr > SIZE)
+        return 0;
+
+    return mem.data[addr];
+}
+U16 get16(const Memory& mem, size_t addr) {
+    Byte low = mem_get(mem, addr);
+    Byte high = mem_get(mem, addr + 1);
+    return (U16)(low | (high << 8));
+}
+
+
+bool mem_set(Memory& mem, size_t addr, Byte value) {
+    
+    if(addr > SIZE)
+        return false;
+
+    mem.data[addr] = value;
+    return true;
+}
+bool set16(Memory& mem, size_t addr, U16 value){
+
+    if(addr >= SIZE)
+        return false;
+
+    Byte low = value;           //  автоматично відріже 8 молодших біт (усічення)
+    Byte high = value >> 8;
+
+    mem.data[addr] = low;
+    mem.data[addr + 1] = high;
+
+    return true;
+}
+
+
+bool inc(Memory& mem, size_t addr){
+
+    if(addr > SIZE)
+        return false;
+    
+    Byte b = mem_get(mem, addr);
+    b++;
+    return mem_set(mem, addr, b);
+}
+ 
+
+//src/memory.hpp
+#ifndef _MEMORY_HPP_
+#define _MEMORY_HPP_
+
+#include <iostream>
+#include <cstddef>
+#include <cstdint>
+
+using namespace std;
+
+// --- ALIASES
+using Byte = uint8_t;
+using U16 = uint16_t;
+
+// `const` means: this name will not be used to change these bits.
+const size_t MEM_SIZE = 4096;
+
+// Межі пам'яті стека
+const size_t STACK_LO = 0xF00;
+const size_t STACK_HI = 0xFFF;
+
+
+
+struct Memory {
+    Byte data[MEM_SIZE]{};
+};
+
+Byte mem_get(const Memory& mem, size_t addr);
+bool mem_set(Memory& mem, size_t addr, Byte value);
+
+U16 get16(const Memory& mem, size_t addr);
+bool set16(Memory& mem, size_t addr, U16 value);
+
+//  Get byte, increment and overwrite
+bool inc(Memory& mem, size_t addr);
+
+#endif
+
+//src/stack.cpp
+#include "stack.hpp"
+
+
+void stack_init(Stack& s, Memory& mem) {
+    s.mem = &mem;
+    s.sp = STACK_HI;
+}
+
+
+
+bool push(Stack& s, Byte v) {
+    if (s.sp < STACK_LO) return false;   // нижче 0xF00
+    
+    mem_set(*s.mem, s.sp, v);            // запис у пам'ять
+    s.sp--;                              // зменшення адреси
+    return true;
+}
+
+bool pop(Stack& s, Byte& out) {
+    if (s.sp >= STACK_HI) return false;  // пустий стек
+
+    s.sp++;                              // збільшення адреси
+    out = mem_get(*s.mem, s.sp);         // читання з адреси
+    return true;
+}
+
+
+
+U16 stack_sp(const Stack& s) {
+    return s.sp;
+}
+
+//src/stack.hpp
+#ifndef _STACK_HPP_
+#define _STACK_HPP_
+
+#include "memory.hpp"
+
+using namespace std;
+
+struct Stack {
+    Memory* mem = nullptr;
+    U16 sp = STACK_HI;          // 0xFFF - стек порожній
+};
+
+
+void stack_init(Stack& s, Memory& mem);
+bool push(Stack& s, Byte v);
+bool pop(Stack& s, Byte& out);
+
+U16 stack_sp(const Stack& s);
+
+#endif
+
